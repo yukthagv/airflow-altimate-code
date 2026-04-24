@@ -8,6 +8,14 @@ the tasks from trying to write to the same DuckDB database at the same time.
 """
 
 from airflow.decorators import dag
+
+# DuckDB's PyConnection lacks a DBAPI `rowcount`, but pandas.to_sql (called by
+# astro-sdk's load_file) reads it after INSERTs. Patch duckdb_engine's
+# CursorWrapper to return -1 ("unknown") so the load completes.
+from duckdb_engine import CursorWrapper as _DuckDBCursorWrapper
+if not hasattr(_DuckDBCursorWrapper, "rowcount"):
+    _DuckDBCursorWrapper.rowcount = property(lambda self: -1)
+
 from astro import sql as aql
 from astro.files import File
 from astro.sql.table import Table
@@ -16,7 +24,7 @@ import pandas as pd
 from airflow.operators.bash import BashOperator
 
 CSV_PATH = "include/ducks.csv"
-DUCKDB_CONN_ID = "my_motherduck_conn"  # Set to your connection ID of a DuckDB or MotherDuck connection
+DUCKDB_CONN_ID = "my_local_duckdb_conn"
 DUCKDB_POOL_NAME = "duckdb_pool"
 
 
