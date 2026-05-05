@@ -5,6 +5,9 @@ This DAG creates the shared DuckDB pool used in the project, loads the
 `include/sample_sales.csv` file into a DuckDB table called `sales`, and logs
 total sales amount by region. The pool serializes the write task so only one
 writer updates DuckDB at a time.
+
+Airflow 3 Migration Notes:
+  - read_csv_auto() renamed to read_csv() in DuckDB >=1.0
 """
 
 from logging import getLogger
@@ -46,9 +49,10 @@ def duck_db_csv_ingest():
         duckdb_hook = DuckDBHook.get_hook(LOCAL_DUCKDB_CONN_ID)
         conn = duckdb_hook.get_conn()
         conn.execute(f"DROP TABLE IF EXISTS {table_name};")
+        # Airflow 3: read_csv_auto() -> read_csv() (DuckDB >=1.0)
         conn.execute(
             f"CREATE TABLE {table_name} AS "
-            f"SELECT * FROM read_csv_auto('{CSV_PATH.as_posix()}', header=True);"
+            f"SELECT * FROM read_csv('{CSV_PATH.as_posix()}', header=True);"
         )
         loaded_rows = conn.execute(f"SELECT COUNT(*) FROM {table_name};").fetchone()[0]
         LOGGER.info("Loaded %s rows into %s from %s", loaded_rows, table_name, CSV_PATH)

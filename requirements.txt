@@ -1,4 +1,10 @@
-# Astro Runtime includes the following pre-installed providers packages: https://docs.astronomer.io/astro/runtime-image-architecture#provider-packages
-duckdb==0.8.1
+# Airflow 3 Migration: updated from Airflow 2.6.3 (astro-runtime:8.6.0)
+#
+# Changes vs Airflow 2:
+#   - duckdb: 0.8.1 -> 1.5.2  (Python >=3.10 required; read_csv_auto() -> read_csv())
+#   - airflow-provider-duckdb: 0.2.0 kept (declares apache-airflow>=2.0, no hard Airflow 3 block)
+#   - astro-sdk-python: REMOVED — not confirmed compatible with Airflow 3;
+#     duckdb_and_astro_sdk_example.py has been rewritten using DuckDBHook + @task directly
+
+duckdb==1.5.2
 airflow-provider-duckdb==0.2.0
-astro-sdk-python[duckdb]==1.6.1

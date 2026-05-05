@@ -7,6 +7,13 @@ DuckDB file stored under `include/my_local_ducks.db`.
 
 The tasks that write to the persistent file are chained so only one writer
 holds the DuckDB file lock at a time.
+
+Airflow 3 Migration Notes:
+  - read_csv_auto() renamed to read_csv() in DuckDB >=1.0
+  - create_pandas_df() now returns a JSON-serializable dict instead of a
+    DataFrame to avoid XCom pickling issues in Airflow 3 (pickling disabled
+    by default). The receiving task reconstructs the DataFrame from the dict.
+  - Added tags and default_args retries=2 to satisfy DAG integrity tests.
 """
 
 from airflow.decorators import dag, task
@@ -18,14 +25,21 @@ CSV_PATH = "include/ducks.csv"
 LOCAL_DUCKDB_STORAGE_PATH = "include/my_local_ducks.db"
 
 
-@dag(start_date=datetime(2023, 6, 1), schedule=None, catchup=False)
+@dag(
+    start_date=datetime(2023, 6, 1),
+    schedule=None,
+    catchup=False,
+    tags=["duckdb", "taskflow", "demo"],
+    default_args={"retries": 2},
+)
 def duckdb_in_taskflow():
     @task
     def create_table_in_memory_db_1():
         "Create and query a temporary in-memory DuckDB database."
 
+        # Airflow 3: read_csv_auto() -> read_csv() (DuckDB >=1.0)
         in_memory_duck_table_1 = duckdb.sql(
-            f"SELECT * FROM read_csv_auto('{CSV_PATH}', header=True);"
+            f"SELECT * FROM read_csv('{CSV_PATH}', header=True);"
         )
         duck_species_count = duckdb.sql(
             "SELECT count(*) FROM in_memory_duck_table_1;"
@@ -37,9 +51,10 @@ def duckdb_in_taskflow():
         "Create and query a temporary in-memory DuckDB database."
 
         conn = duckdb.connect()
+        # Airflow 3: read_csv_auto() -> read_csv() (DuckDB >=1.0)
         conn.sql(
             f"""CREATE TABLE IF NOT EXISTS in_memory_duck_table_2 AS
-            SELECT * FROM read_csv_auto('{CSV_PATH}', header=True);"""
+            SELECT * FROM read_csv('{CSV_PATH}', header=True);"""
         )
         duck_species_count = conn.sql(
             "SELECT count(*) FROM in_memory_duck_table_2;"
@@ -48,17 +63,21 @@ def duckdb_in_taskflow():
 
     @task
     def create_pandas_df():
-        "Create a pandas DataFrame with toy data and return it."
-        ducks_in_my_garden_df = pd.DataFrame(
-            {"colors": ["blue", "red", "yellow"], "numbers": [2, 3, 4]}
-        )
+        """Create a pandas DataFrame with toy data and return it as a dict.
 
-        return ducks_in_my_garden_df
+        Airflow 3 disables XCom pickling by default (enable_xcom_pickling=False).
+        Returning a dict ensures JSON-safe XCom serialization instead of a
+        raw DataFrame which would require pickling.
+        """
+        ducks_in_my_garden = {"colors": ["blue", "red", "yellow"], "numbers": [2, 3, 4]}
+        return ducks_in_my_garden
 
     @task
-    def create_table_from_pandas_df(ducks_in_my_garden_df, local_duckdb_storage_path):
+    def create_table_from_pandas_df(ducks_in_my_garden_dict, local_duckdb_storage_path):
         "Create a table in a local DuckDB file from a pandas DataFrame."
 
+        # Reconstruct DataFrame from the JSON-safe dict passed via XCom
+        ducks_in_my_garden_df = pd.DataFrame(ducks_in_my_garden_dict)
         conn = duckdb.connect(local_duckdb_storage_path)
         conn.sql(
             """CREATE TABLE IF NOT EXISTS ducks_garden AS
@@ -70,9 +89,10 @@ def duckdb_in_taskflow():
         "Create a table in a local persistent DuckDB database."
 
         conn = duckdb.connect(local_duckdb_storage_path)
+        # Airflow 3: read_csv_auto() -> read_csv() (DuckDB >=1.0)
         conn.sql(
             f"""CREATE TABLE IF NOT EXISTS persistent_duck_table AS
-            SELECT * FROM read_csv_auto('{CSV_PATH}', header=True);"""
+            SELECT * FROM read_csv('{CSV_PATH}', header=True);"""
         )
         duck_species_count = conn.sql(
             "SELECT count(*) FROM persistent_duck_table;"
@@ -102,9 +122,10 @@ def duckdb_in_taskflow():
         "Load data from a CSV file into a table in a local DuckDB database."
 
         conn = duckdb.connect(local_duckdb_storage_path)
+        # Airflow 3: read_csv_auto() -> read_csv() (DuckDB >=1.0)
         conn.sql(
             f"""CREATE TABLE IF NOT EXISTS duck_species_table AS
-            SELECT * FROM read_csv_auto('{CSV_PATH}', header=True);"""
+            SELECT * FROM read_csv('{CSV_PATH}', header=True);"""
         )
         duck_species_count = conn.sql(
             "SELECT count(*) FROM duck_species_table;"
@@ -131,7 +152,13 @@ def duckdb_in_taskflow():
         create_pandas_df(), local_duckdb_storage_path=LOCAL_DUCKDB_STORAGE_PATH
     )
 
-    persistent_create >> persistent_query >> csv_count >> print_count(csv_count) >> pandas_write
+    (
+        persistent_create
+        >> persistent_query
+        >> csv_count
+        >> print_count(csv_count)
+        >> pandas_write
+    )
 
 
 duckdb_in_taskflow()
