@@ -50,12 +50,13 @@ def duckdb_provider_example():
 
     @task
     def query_local_duckdb(my_table):
-        # Airflow 3: open in read_only mode to avoid file-lock conflict.
-        # DuckDB supports multiple concurrent read-only connections but only
-        # one writer. Airflow 3 task isolation means the seed task's write
-        # connection may still appear locked at the OS level.
+        # Airflow 3: get the DB path from the Airflow connection host field
+        # and open in read_only=True to avoid file-lock conflict.
+        # DuckDB 1.5.2 DuckDBPyConnection no longer exposes a .database attr;
+        # instead we read the path from the Airflow connection directly.
         my_duck_hook = DuckDBHook.get_hook(LOCAL_DUCKDB_CONN_ID)
-        db_path = my_duck_hook.get_conn().database  # get the DB file path
+        airflow_conn = my_duck_hook.get_connection(LOCAL_DUCKDB_CONN_ID)
+        db_path = airflow_conn.host  # the file path configured in the connection
         conn = duckdb.connect(db_path, read_only=True)
 
         r = conn.execute(f"SELECT * FROM {my_table};").fetchall()
