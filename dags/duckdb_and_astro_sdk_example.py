@@ -18,12 +18,19 @@ Airflow 3 Migration Notes:
   - aql.cleanup()       -> removed (no temp tables to clean up)
   - duckdb_engine patch -> removed (was only needed by astro-sdk's pandas.to_sql)
   - read_csv_auto()     -> read_csv() (DuckDB >=1.0 API change)
-  - Added tags for DAG integrity test compliance.
+  - BashOperator pool creation REMOVED: In Airflow 3, task workers are isolated
+    and cannot call the airflow CLI. Pool is created via REST API in a @task.
+  - airflow.decorators deprecated -> airflow.sdk (Airflow 3 stable interface)
 """
 
+import json
+import logging
+import os
+import urllib.error
+import urllib.request
+
 import pandas as pd
-from airflow.decorators import dag, task
-from airflow.operators.bash import BashOperator
+from airflow.sdk import dag, task
 from duckdb_provider.hooks.duckdb_hook import DuckDBHook
 from pendulum import datetime
 
@@ -32,6 +39,59 @@ DUCKDB_POOL_NAME = "duckdb_pool"
 CSV_PATH = "include/ducks.csv"
 SOURCE_TABLE = "ducks"
 SAMPLE_TABLE = "three_random_ducks"
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _ensure_pool_via_api(pool_name: str, slots: int = 1):
+    """Create a named pool via the Airflow 3 REST API if it does not exist."""
+    base_url = os.environ.get("AIRFLOW__API__BASE_URL", "http://localhost:8080")
+
+    # Authenticate
+    auth_payload = json.dumps({"username": "admin", "password": "admin"}).encode()
+    req = urllib.request.Request(
+        f"{base_url}/auth/token",
+        data=auth_payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        token = json.loads(resp.read())["access_token"]
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    # Check if pool exists
+    check_req = urllib.request.Request(
+        f"{base_url}/api/v2/pools/{pool_name}", headers=headers, method="GET"
+    )
+    try:
+        with urllib.request.urlopen(check_req) as resp:
+            data = json.loads(resp.read())
+            LOGGER.info(
+                "Pool '%s' already exists (%d slots)", pool_name, data.get("slots", 0)
+            )
+            return
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+
+    # Create pool
+    payload = json.dumps(
+        {
+            "name": pool_name,
+            "slots": slots,
+            "description": "Pool for DuckDB — serialises writes",
+            "include_deferred": False,
+        }
+    ).encode()
+    create_req = urllib.request.Request(
+        f"{base_url}/api/v2/pools", data=payload, headers=headers, method="POST"
+    )
+    with urllib.request.urlopen(create_req) as resp:
+        result = json.loads(resp.read())
+        LOGGER.info(
+            "Created pool '%s' with %d slot(s)", result["name"], result["slots"]
+        )
 
 
 @dag(
@@ -42,13 +102,10 @@ SAMPLE_TABLE = "three_random_ducks"
     default_args={"retries": 2},
 )
 def duckdb_and_astro_sdk_example():
-    create_duckdb_pool = BashOperator(
-        task_id="create_duckdb_pool",
-        bash_command=(
-            f"airflow pools list | grep -q '{DUCKDB_POOL_NAME}' "
-            f"|| airflow pools set {DUCKDB_POOL_NAME} 1 'Pool for duckdb'"
-        ),
-    )
+    @task(task_id="create_duckdb_pool")
+    def create_duckdb_pool():
+        """Ensure the duckdb_pool exists via the Airflow 3 REST API."""
+        _ensure_pool_via_api(DUCKDB_POOL_NAME, slots=1)
 
     @task(task_id="load_ducks", pool=DUCKDB_POOL_NAME)
     def load_ducks():
@@ -72,7 +129,6 @@ def duckdb_and_astro_sdk_example():
         """Log the row count loaded from ducks.csv.
 
         Replaces: @aql.transform running SELECT count(*) FROM {{ in_table }}
-        The row count is passed directly from load_ducks via XCom.
         """
         print(f"Loaded {row_count} duck species into DuckDB.")
         return row_count
@@ -82,17 +138,12 @@ def duckdb_and_astro_sdk_example():
         """Sample 3 random ducks and persist to a separate table.
 
         Replaces: @aql.dataframe sampling 3 random rows and writing back.
-        Uses pandas for the random sample, then writes back via DuckDB.
         """
         hook = DuckDBHook.get_hook(DUCKDB_CONN_ID)
         conn = hook.get_conn()
-
-        # Load into pandas for the random sample (mirrors original @aql.dataframe)
         df = conn.execute(f"SELECT * FROM {SOURCE_TABLE};").df()
         three_random_ducks = df.sample(n=min(3, len(df)), replace=False)
         print(three_random_ducks)
-
-        # Persist sample table back to DuckDB
         conn.execute(f"DROP TABLE IF EXISTS {SAMPLE_TABLE};")
         conn.execute(
             f"CREATE TABLE {SAMPLE_TABLE} AS SELECT * FROM three_random_ducks;"
@@ -100,10 +151,9 @@ def duckdb_and_astro_sdk_example():
         return len(three_random_ducks)
 
     # Wire up the pipeline
+    pooled = create_duckdb_pool()
     loaded = load_ducks()
-    create_duckdb_pool >> loaded
-
-    # count_ducks and select_ducks both depend on the load completing
+    pooled >> loaded
     count_ducks(loaded)
     select_ducks()
 

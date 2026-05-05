@@ -12,7 +12,7 @@ Airflow 3 Migration Notes:
     which does not hard-block Airflow 3
 """
 
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 from pendulum import datetime
 from duckdb_provider.hooks.duckdb_hook import DuckDBHook
 

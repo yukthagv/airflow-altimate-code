@@ -16,7 +16,7 @@ Airflow 3 Migration Notes:
   - Added tags and default_args retries=2 to satisfy DAG integrity tests.
 """
 
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 from pendulum import datetime
 import duckdb
 import pandas as pd

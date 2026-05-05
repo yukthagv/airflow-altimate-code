@@ -9,7 +9,7 @@ Airflow 3 Migration Notes:
   - ExcelToDuckDBOperator updated to use airflow.sdk.BaseOperator (see operator file).
 """
 
-from airflow.decorators import dag
+from airflow.sdk import dag
 from pendulum import datetime
 from include.custom_operators.duckdb_operator import ExcelToDuckDBOperator
 
