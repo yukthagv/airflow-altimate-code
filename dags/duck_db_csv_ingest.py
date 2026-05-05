@@ -1,17 +1,18 @@
 """
 ### Ingest sample sales CSV into DuckDB and aggregate totals by region
 
-This DAG creates the shared DuckDB pool used in the project, loads the
-`include/sample_sales.csv` file into a DuckDB table called `sales`, and logs
-total sales amount by region. The pool serializes the write task so only one
-writer updates DuckDB at a time.
+This DAG loads the `include/sample_sales.csv` file into a DuckDB table called
+`sales`, and logs total sales amount by region. The `duckdb_pool` pool
+serialises the write task so only one writer updates DuckDB at a time.
 
 Airflow 3 Migration Notes:
   - read_csv_auto() renamed to read_csv() in DuckDB >=1.0
-  - BashOperator pool creation REMOVED: In Airflow 3, task workers run in
-    isolated processes with no access to the metadata DB or airflow CLI.
-    Pool is now created via the Airflow 3 REST API inside a @task.
-  - airflow.decorators deprecated in favour of airflow.sdk — updated imports.
+  - BashOperator pool creation REMOVED entirely: In Airflow 3, task workers run
+    in isolated processes with no access to the metadata DB or the CLI.
+    The duckdb_pool must be pre-created once via:
+      airflow pools set duckdb_pool 1 "Pool for DuckDB"
+    or via the Airflow UI / REST API before triggering this DAG.
+  - airflow.decorators deprecated -> airflow.sdk (Airflow 3 stable interface)
 """
 
 from logging import getLogger
@@ -36,78 +37,6 @@ LOGGER = getLogger(__name__)
     tags=["duckdb", "csv", "demo"],
 )
 def duck_db_csv_ingest():
-    @task(task_id="create_duckdb_pool")
-    def create_duckdb_pool():
-        """Ensure the duckdb_pool exists via the Airflow 3 REST API.
-
-        Airflow 3: BashOperator running 'airflow pools set' no longer works
-        because task workers are isolated and cannot access the metadata DB.
-        We use the REST API (localhost:8080) instead, which is always reachable
-        from within the same Docker network.
-        """
-        import os
-        import urllib.request
-        import urllib.parse
-        import json
-
-        base_url = os.environ.get("AIRFLOW__API__BASE_URL", "http://localhost:8080")
-
-        # Authenticate — get JWT token
-        auth_payload = json.dumps({"username": "admin", "password": "admin"}).encode()
-        req = urllib.request.Request(
-            f"{base_url}/auth/token",
-            data=auth_payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req) as resp:
-            token = json.loads(resp.read())["access_token"]
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-
-        # Check if pool already exists
-        check_req = urllib.request.Request(
-            f"{base_url}/api/v2/pools/{DUCKDB_POOL_NAME}",
-            headers=headers,
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(check_req) as resp:
-                pool_data = json.loads(resp.read())
-                LOGGER.info(
-                    "Pool '%s' already exists with %d slots",
-                    DUCKDB_POOL_NAME,
-                    pool_data.get("slots", 0),
-                )
-                return
-        except urllib.error.HTTPError as e:
-            if e.code != 404:
-                raise
-
-        # Create the pool
-        pool_payload = json.dumps(
-            {
-                "name": DUCKDB_POOL_NAME,
-                "slots": 1,
-                "description": "Pool for DuckDB — serialises writes to prevent file lock conflicts",
-                "include_deferred": False,
-            }
-        ).encode()
-        create_req = urllib.request.Request(
-            f"{base_url}/api/v2/pools",
-            data=pool_payload,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(create_req) as resp:
-            result = json.loads(resp.read())
-            LOGGER.info(
-                "Created pool '%s' with %d slot(s)", result["name"], result["slots"]
-            )
-
     @task(task_id="load_sales_csv", pool=DUCKDB_POOL_NAME)
     def load_sales_csv(table_name: str):
         if not CSV_PATH.exists():
@@ -148,8 +77,7 @@ def duck_db_csv_ingest():
         return results
 
     (
-        create_duckdb_pool()
-        >> load_sales_csv(table_name=SALES_TABLE_NAME)
+        load_sales_csv(table_name=SALES_TABLE_NAME)
         >> log_sales_totals_by_region(table_name=SALES_TABLE_NAME)
     )
 

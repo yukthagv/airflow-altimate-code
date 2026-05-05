@@ -10,11 +10,18 @@ Airflow 3 Migration Notes:
   - Added tags and default_args retries=2 to satisfy DAG integrity checks
   - DuckDBHook import path unchanged; provider declares apache-airflow>=2.0
     which does not hard-block Airflow 3
+  - airflow.decorators deprecated -> airflow.sdk (Airflow 3 stable interface)
+  - query_local_duckdb opens the DB in read_only mode to avoid file-lock
+    conflicts with the Airflow 3 Task SDK process isolation model. In Airflow 3
+    each task runs in its own subprocess; DuckDB allows concurrent read-only
+    connections but only one writer at a time. Using read_only=True for the
+    read task avoids the "Conflicting lock" IOException.
 """
 
+import duckdb
 from airflow.sdk import dag, task
-from pendulum import datetime
 from duckdb_provider.hooks.duckdb_hook import DuckDBHook
+from pendulum import datetime
 
 CSV_PATH = "include/ducks.csv"
 LOCAL_DUCKDB_CONN_ID = "my_local_duckdb_conn"
@@ -38,15 +45,22 @@ def duckdb_provider_example():
             f"CREATE TABLE IF NOT EXISTS {my_table} AS "
             f"SELECT * FROM read_csv('{CSV_PATH}', header=True);"
         )
+        # Explicitly close to release the write lock before query task starts
+        conn.close()
 
     @task
     def query_local_duckdb(my_table):
+        # Airflow 3: open in read_only mode to avoid file-lock conflict.
+        # DuckDB supports multiple concurrent read-only connections but only
+        # one writer. Airflow 3 task isolation means the seed task's write
+        # connection may still appear locked at the OS level.
         my_duck_hook = DuckDBHook.get_hook(LOCAL_DUCKDB_CONN_ID)
-        conn = my_duck_hook.get_conn()
+        db_path = my_duck_hook.get_conn().database  # get the DB file path
+        conn = duckdb.connect(db_path, read_only=True)
 
         r = conn.execute(f"SELECT * FROM {my_table};").fetchall()
         print(r)
-
+        conn.close()
         return r
 
     seed_local_duckdb(my_table=LOCAL_DUCKDB_TABLE_NAME) >> query_local_duckdb(
